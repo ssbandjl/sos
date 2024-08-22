@@ -1,0 +1,91 @@
+origin_repo: https://github.com/brenns10/sos
+virtio_blk: https://brennan.io/2020/03/22/sos-block-device/
+
+
+
+kernel/main.c
+    fs_init
+    blk_init
+    virtio_init
+        uint32_t page_virt = (uint32_t)kmem_map_periph(0x0a000000U, 0x4000)
+        for (int i = 0; i < 32; i++)
+            virtio_dev_init(page_virt + 0x200 * i, 32 + 0x10 + i)
+                virtio_regs *regs = (virtio_regs *)virt
+                switch (READ32(regs->DeviceID))
+                case VIRTIO_DEV_BLK
+                    return virtio_blk_init(regs, intid)
+
+
+
+
+run:
+$ make run
+Running. Exit with Ctrl-A X
+
+qemu-system-arm -M virt -global virtio-mmio.force-legacy=false -drive file=mydisk,if=none,format=raw,id=hd -device virtio-blk-device,drive=hd -kernel kernel.bin -nographic
+SOS: Startup
+... lots of virtio-blk debugging output I need to clean up ...
+Stephen's OS (user shell, pid=2)
+ush> exit
+[kernel] Process 2 exited with code 0.
+[kernel] WARNING: no more processes remain
+Stephen's OS, v0.1
+ksh> blkwrite 1 this_is_a_test
+ksh> blkread 1
+virtio-blk: result: "this_is_a_test"
+ksh> blkwrite 1 this_is_a_second_test
+ksh> blkread 1
+ksh> virtio-blk: result: "this_is_a_second_test"
+
+
+high, low
+#define HI32(u64) ((uint32_t)((0xFFFFFFFF00000000ULL & (u64)) >> 32))
+#define LO32(u64) ((uint32_t)(0x00000000FFFFFFFFULL & (u64)))
+
+virtio_blk_init
+    vdev = kmalloc(sizeof(struct virtio_blk))
+    virtio_check_capabilities
+    virtq = virtq_create(128)
+    virtq_add_to_device(regs, virtq, 0)
+        WRITE32(regs->QueueSel, queue_sel)
+        WRITE32(regs->QueueAvailLow, virtq->phys + ((void *)virtq->avail - (void *)virtq))
+        ...
+    vdev->blkdev.ops = &virtio_blk_ops
+    list_insert(&vdevs, &vdev->list)
+    gic_register_isr(intid, 1, virtio_blk_isr, "virtio-blk")
+        gic_handlers[intid_start + i] = isr
+        virtio_blk_isr
+            virtio_blk_handle_used
+                desc1 = virtq->used->ring[usedidx].id;
+                req = virtq->desc_virt[desc1]
+            gic_end_interrupt
+    gic_enable_interrupt(intid)
+    blkdev_register(&vdev->blkdev)
+        list_insert_end(&blkdev_list, &dev->blklist)
+
+
+struct ksh_cmd blk_ksh_cmds[] = {
+	KSH_CMD("read", blk_cmd_read, "read block device sector"),
+	KSH_CMD("write", blk_cmd_write, "write block device sector"),
+	KSH_CMD("status", blk_cmd_status, "read block device status"),
+	{ 0 },
+};
+
+
+blk_cmd_write
+    dev = blkdev_get_by_name(argv[0])
+    dev->ops->submit(dev, req) -> virtio_blk_submit
+        struct virtio_blk_req *hdr = get_vblkreq(req)
+        d1 = virtq_alloc_desc(blk->virtq, hdr)
+        hdr->descriptor = d1
+        virtio_blk_send(blk, hdr)
+            blk->virtq->avail->ring[blk->virtq->avail->idx % blk->virtq->len] = hdr->descriptor
+            WRITE32(blk->regs->QueueNotify, 0)
+    wait_for(&req->wait) <- wait_list_awaken(&req->blkreq.wait)
+
+
+
+blk_cmd_read
+    dev->ops->submit(dev, req)
+
+
