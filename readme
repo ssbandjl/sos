@@ -2,10 +2,77 @@ origin_repo: https://github.com/brenns10/sos
 virtio_blk: https://brennan.io/2020/03/22/sos-block-device/
 
 
+gic: generic interrupt controller
+
+
+start, entry:
+docs/Contexts.md
+kernel/startup.s
+    bl pre_mmu -> void pre_mmu(uint32_t phys) -> 启动时立即调用。这是实现早期逻辑的绝佳位置： - 隔离多核系统的核心 - 初始化控制台 - 设置页表 从此函数返回后，MMU 已启用，我们跳转到内核的目标虚拟地址，并执行 main()。请注意，由于此时 MMU 已禁用，因此我们必须非常小心使用指针的任何代码。变量和函数通过其偏移量使用（这要归功于位置无关的代码），但是如果您创建指针，则似乎指针将引用链接器地址。鉴于我们链接到虚拟地址空间，这很糟糕。所以要小心。*/
+        memset((void *)(phys + (uint32_t)&bss_start - (uint32_t)&code_start), 0, data_end - bss_start)
+        uart_init
+            WRITE32(base->UARTLCR_H, UARTLCR_8BIT)
+                #define base ((pl011_registers *)uart_base)
+        board_premmu
+            set_gpio_function
+            led_act_off
+                write_mbox(msg, MBOX_CHAN_PTAG)
+            led_pwr_off
+        kmem_init2(phys)
+            phy_start = board_memory_start() -> 0x40000000
+            kmem_init_page_tables(phy_start, size)
+                end_mb = get_kern_end_mb(size)
+            map_first_page_identity()
+            set_ttbr0((uint32_t)first_level_table)
+
 
 kernel/main.c
+    kmem_init2_postmmu
+        set_ttbr0(0) -> set_cpreg2(val, 0, c2, c0, 0)
+            __asm__ __volatile__("mcr p15, " #op1 ", %[rs], " #CRn ", " #CRm
+        first_level_table = kptov((uint32_t) first_level_table)
+            return (void *) (addr - phy_start + CONFIG_KERNEL_START)
+        unmap_first_page_identity
+        init_page_allocator
+        kmem_get_pages
+        setup_stacks
+    uart_remap
+        uart_base = (uint32_t)kmem_map_periph(uart_base, 0x1000)
+            uint32_t virt = alloc_pages(kern_virt_allocator, len, 0)
+                alignzone = zone = hdr->zones[i].addr << PAGE_BITS
+            map_pages(first_level_table, virt, phys, len, PERIPH_DEFAULT)
+                for (i = 0; i < len; i += 4096)
+                    map_page(base, virt + i, phys + i, attrs)
+            mb() -> isp
+            isb() -> dsp
+    board_init
+        tlbiall
+        gpio_remap
+        mbox_remap
+        led_act_on
+        uart_set_echo
+        ICIALLU
+        data_cache_clear_all
+            set_csselr
+            get_ccsidr
+    kmalloc_init
+        for (i = 0; i < nelem(kmalloc_sizes); i++)
+            kmalloc_sizes[i].slab = slab_new(kmalloc_sizes[i].slabname, kmalloc_sizes[i].size, kmem_get_page)
+                INIT_LIST_HEAD(slab->entries)
+                list_insert_end(&slabs, &slab->slabs)
+                slab_add_entries
+                    list_insert_end(&slab->entries, tmp)
+    process_init
+        proc_slab = slab_new("process", sizeof(struct process), kmem_get_page)
+        idle_process = create_kthread(idle, NULL)
+            wait_list_init(&p->endlist)
     fs_init
+        fs_node_slab = slab_new("fs_node", sizeof(struct fs_node), kmem_get_page)
+        strlcpy(fs_root->name, "/", sizeof(fs_root->name))
+        fs_root->type = FSN_LAZY_DIR
     blk_init
+        INIT_SPINSEM(&blkdev_list_lock, 1);
+        INIT_LIST_HEAD(blkdev_list);
     virtio_init
         uint32_t page_virt = (uint32_t)kmem_map_periph(0x0a000000U, 0x4000)
         for (int i = 0; i < 32; i++)
